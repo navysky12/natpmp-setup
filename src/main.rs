@@ -107,42 +107,62 @@ fn query_port(
     let mut timeout = 250;
     while timeout <= 64000 {
         // Send a port mapping request.
-        let _ = n.send_port_mapping_request(Protocol::TCP, 0, 0, 360)
-            .map_err(|err| anyhow!("Fail with {:?}", err));
+        let _ = n.send_port_mapping_request(Protocol::TCP, internal, external, 360)
+            .map_err(|err| anyhow!("Failed to send port mapping request: {:?}", err));
         println!("Port mapping request sent! (will timeout in {}ms)", timeout);
 
         // Wait for a response or timeout.
-        thread::sleep(Duration::from_millis(1000));
+        thread::sleep(Duration::from_millis(timeout));
         match n.read_response_or_retry() {
-            Err(e) => match e {
-                Error::NATPMP_TRYAGAIN => println!("Try again later"),
-                _ => return Err(anyhow!("Try again later: {:?}", e)),
-            },
-            Ok(Response::TCP(tr)) => {
-                // Successfully received a TCP response with port information.
-                println!(
-                    "Got response: Internal: {}, External: {}, Lifetime: {}s",
-                    tr.private_port(),
-                    tr.public_port(),
-                    tr.lifetime().as_secs()
-                );
-                // Verify if the response matches the requested mapping, if applicable.
-                if (!check)
-                    || (tr.private_port() == internal
-                        && tr.public_port() == external
-                        && tr.lifetime().as_secs() > 0)
-                {
-                    return Ok(tr);
+            Err(e) => {
+                println!("Failed to read NAT-PMP response: {:?}", e);
+                if let Error::NATPMP_TRYAGAIN = e {
+                    println!("Retry suggested by NAT-PMP. Trying again after a delay.");
+                    thread::sleep(Duration::from_millis(timeout));
                 } else {
-                    println!("Retrying, port is not the one wanted!");
+                    return Err(anyhow!("Error reading NAT-PMP response: {:?}", e));
                 }
-            }
-            _ => {
-                bail!("Expecting a TCP response");
+            },
+            Ok(response) => {
+                match response {
+                    Response::TCP(tr) => {
+                        println!(
+                            "Received TCP mapping response: Internal: {}, External: {}, Lifetime: {}s",
+                            tr.private_port(),
+                            tr.public_port(),
+                            tr.lifetime().as_secs()
+                        );
+                        // Verify if the response matches the requested mapping, if applicable.
+                        if !check
+                            || (tr.private_port() == internal
+                                && tr.public_port() == external
+                                && tr.lifetime().as_secs() > 0)
+                        {
+                            return Ok(tr);
+                        } else {
+                            println!("Received port does not match requested parameters. Retrying...");
+                        }
+                    },
+                    Response::UDP(ur) => {
+                        println!(
+                            "Received UDP mapping response (unexpected): Internal: {}, External: {}, Lifetime: {}s",
+                            ur.private_port(),
+                            ur.public_port(),
+                            ur.lifetime().as_secs()
+                        );
+                    },
+                    Response::Gateway(gr) => {
+                        println!(
+                            "Received public address response (unexpected): IP: {}, Epoch: {}",
+                            gr.public_address(),
+                            gr.epoch()
+                        );
+                    },
+                }
             }
         };
         // Increase timeout for the next attempt.
         timeout *= 2;
     }
-    bail!("Mapping failed!");
+    bail!("Mapping failed after multiple attempts.");
 }
