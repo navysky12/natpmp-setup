@@ -1,26 +1,32 @@
 use anyhow::{anyhow, bail, Result};
 use natpmp::*;
-use reqwest::blocking::Client;
-use reqwest::Url;
+use std::env;
+use std::fs::File;
+use std::io::{Write, Result as IoResult};
+use std::process;
 use std::thread;
 use std::time::Duration;
 
 fn main() -> Result<()> {
     // Retrieve the gateway IP from environment variable or use a default.
-    let gateway = std::env::var("NATPMP_GATEWAY_IP").unwrap_or("10.2.0.1".to_owned());
+    let gateway = env::var("NATPMP_GATEWAY_IP").unwrap_or("10.2.0.1".to_owned());
     // Create a new NAT-PMP client using the gateway IP.
     let mut n =
         Natpmp::new_with((&gateway).parse().unwrap()).expect("Parsing gateway address failed!");
-    // Initialize a default HTTP client instance for making network requests. 
-    let mut client = Client::default();
+
+    // Retrieve the first command line argument as the filename for the output file.
+    let filename = env::args().nth(1).expect("No file name provided as argument");
+
+    // Open or create the file where PID and port information will be written.
+    let mut file = File::create(filename)?;
 
     // Query the gateway for public IP address, handle failures.
     let _ = query_gateway(&mut n).expect("Querying Public IP failed!");
 
     // Query for an available port using NAT-PMP.
     let mut mr = query_available_port(&mut n).expect("Querying a Port Mapping failed!");
-    // Send API call to qBittorrent client containing port information.
-    update_qbittorrent(&mut client, mr.public_port()).expect("Failed to update QBittorrent.");
+    // Write the initial PID and port information to the file.
+    print_loop_info(&mut file, mr.public_port()).expect("Failed to write loop information.");
 
     // Infinite loop to continuously check and update port mappings.
     loop {
@@ -32,24 +38,20 @@ fn main() -> Result<()> {
             .expect("Every renewal method failed!");
         // Check if the public port has changed.
         if mr.public_port() != mr_.public_port() {
-            println!("Port has changed, setting incoming port on QBittorrent...");
-            update_qbittorrent(&mut client, mr.public_port())
-                .expect("Failed to update QBittorrent.");
+            println!("Port has changed, updating file...");
+            // Update the file with the new port information.
+            print_loop_info(&mut file, mr_.public_port())
+                .expect("Failed to write loop information.");
         }
         // Update the mapping response to continue with the new or renewed mapping.
         mr = mr_;
     }
-
-    Ok(())
 }
 
-// Function to send API call to qBittorrent client with port information.
-fn update_qbittorrent(client: &mut Client, port: u16) -> Result<()> {
-    client
-        .post(Url::parse("http://127.0.0.1:8080/api/v2/app/setPreferences").unwrap())
-        .form(&[("json", &format!(r#"{{"listen_port":{}}}"#, port))])
-        .send()?
-        .error_for_status()?;
+// Function to write the PID and port information to a file.
+fn print_loop_info(file: &mut File, port: u16) -> IoResult<()> {
+    let pid = process::id();  // Get the current process ID.
+    writeln!(file, "{},{}", pid, port)?;  // Write the PID and port to the file.
     Ok(())
 }
 
